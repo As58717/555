@@ -1,0 +1,127 @@
+#include "/Engine/Public/Platform.ush"
+
+RWTexture2D<float4> RWOutputTexture;
+TextureCube<float4> SourceTextureLeft;
+TextureCube<float4> SourceTextureRight;
+SamplerState SourceSampler;
+
+cbuffer FCubemapToEquirectParameters
+{
+    float2 OutputResolution;
+    uint bStereo;
+    uint bLinear;
+    uint bStereoOverUnder;
+    float SeamBlendRadians;
+    float Padding;
+};
+
+float3 DirectionFromEquirect(float2 InUV)
+{
+    const float Phi = InUV.x * (2.0f * PI) - PI;
+    const float Theta = InUV.y * PI - (PI * 0.5f);
+    const float CosTheta = cos(Theta);
+    return float3(cos(Phi) * CosTheta, sin(Theta), sin(Phi) * CosTheta);
+}
+
+float2 WrapUV(float2 InUV)
+{
+    float2 Wrapped = InUV;
+    Wrapped.x = frac(Wrapped.x + 1.0f);
+    Wrapped.y = saturate(Wrapped.y);
+    return Wrapped;
+}
+
+float4 SampleEyeColor(float2 InUV, uint EyeIndex)
+{
+    float3 Direction = DirectionFromEquirect(InUV);
+    return (EyeIndex == 0 ? SourceTextureLeft.SampleLevel(SourceSampler, Direction, 0.0f) : SourceTextureRight.SampleLevel(SourceSampler, Direction, 0.0f));
+}
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= (uint)OutputResolution.x || DispatchThreadId.y >= (uint)OutputResolution.y)
+    {
+        return;
+    }
+
+    float2 OutputUV = (float2(DispatchThreadId.xy) + 0.5f) / OutputResolution;
+    float2 SampleUV = OutputUV;
+    uint EyeIndex = 0;
+
+    if (bStereo != 0)
+    {
+        if (bStereoOverUnder != 0)
+        {
+            if (OutputUV.y >= 0.5f)
+            {
+                EyeIndex = 1;
+                SampleUV.y = (OutputUV.y - 0.5f) * 2.0f;
+            }
+            else
+            {
+                SampleUV.y = OutputUV.y * 2.0f;
+            }
+        }
+        else
+        {
+            if (OutputUV.x >= 0.5f)
+            {
+                EyeIndex = 1;
+                SampleUV.x = (OutputUV.x - 0.5f) * 2.0f;
+            }
+            else
+            {
+                SampleUV.x = OutputUV.x * 2.0f;
+            }
+        }
+    }
+
+    SampleUV = WrapUV(SampleUV);
+
+    float4 Sample = SampleEyeColor(SampleUV, EyeIndex);
+
+    if (SeamBlendRadians > 0.0f)
+    {
+        const float SeamU = SeamBlendRadians / (2.0f * PI);
+        const float SeamV = SeamBlendRadians / PI;
+        const float EdgeU = min(SampleUV.x, 1.0f - SampleUV.x);
+        const float EdgeV = min(SampleUV.y, 1.0f - SampleUV.y);
+        float FeatherU = 0.0f;
+        float FeatherV = 0.0f;
+        if (SeamU > 0.00001f)
+        {
+            FeatherU = saturate((SeamU - EdgeU) / SeamU);
+        }
+        if (SeamV > 0.00001f)
+        {
+            FeatherV = saturate((SeamV - EdgeV) / SeamV);
+        }
+        const float Feather = max(FeatherU, FeatherV);
+
+        if (Feather > 0.0f)
+        {
+            float4 Accumulated = Sample;
+            float Weight = 1.0f;
+            const float2 Offsets[4] = { float2(SeamU, 0.0f), float2(-SeamU, 0.0f), float2(0.0f, SeamV), float2(0.0f, -SeamV) };
+            [unroll]
+            for (int Index = 0; Index < 4; ++Index)
+            {
+                float2 OffsetUV = WrapUV(SampleUV + Offsets[Index]);
+                Accumulated += SampleEyeColor(OffsetUV, EyeIndex);
+                Weight += 1.0f;
+            }
+
+            const float3 Blended = Accumulated.rgb / max(Weight, 1.0f);
+            Sample.rgb = lerp(Sample.rgb, Blended, Feather);
+        }
+    }
+
+    if (bLinear == 0)
+    {
+        Sample.rgb = pow(saturate(Sample.rgb), 1.0f / 2.2f);
+    }
+
+    uint2 OutputCoords = uint2(OutputUV * OutputResolution);
+    RWOutputTexture[OutputCoords] = Sample;
+}

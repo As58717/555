@@ -1,0 +1,105 @@
+#include "/Engine/Public/Platform.ush"
+
+Texture2D<float4> SourceTexture;
+RWTexture2D<float> OutputLumaTexture;
+RWTexture2D<float2> OutputChromaTexture;
+
+cbuffer FEncodeSurfaceParameters
+{
+    uint bApplySRGB;
+    uint bOutputP010;
+    uint bUseRec2020;
+};
+
+static const float3x3 RGBToYUV_Rec709 = float3x3(
+    0.2126f, 0.7152f, 0.0722f,
+   -0.114572f, -0.385428f, 0.500000f,
+    0.500000f, -0.454153f, -0.045847f
+);
+
+static const float3x3 RGBToYUV_Rec2020 = float3x3(
+    0.2627f, 0.6780f, 0.0593f,
+   -0.139630f, -0.360370f, 0.500000f,
+    0.500000f, -0.459786f, -0.040214f
+);
+
+float3 ApplyGamma(float3 LinearColor)
+{
+    if (bApplySRGB != 0)
+    {
+        return pow(saturate(LinearColor), 1.0f / 2.2f);
+    }
+    return saturate(LinearColor);
+}
+
+float EncodeLuma(float Value)
+{
+    float Encoded = saturate(Value);
+    if (bOutputP010 != 0)
+    {
+        Encoded = round(Encoded * 1023.0f);
+        Encoded = clamp(Encoded, 0.0f, 1023.0f);
+        Encoded = (Encoded * 64.0f) / 65535.0f;
+    }
+    return Encoded;
+}
+
+float2 EncodeChroma(float2 Value)
+{
+    float2 Encoded = saturate(Value);
+    if (bOutputP010 != 0)
+    {
+        Encoded = round(Encoded * 1023.0f);
+        Encoded = clamp(Encoded, 0.0f, 1023.0f);
+        Encoded = (Encoded * 64.0f) / 65535.0f;
+    }
+    return Encoded;
+}
+
+float2 SampleToChroma(float2 Coords, uint2 ClampMax)
+{
+    uint2 IntCoords = uint2(min(Coords, float2(ClampMax)));
+    float4 Sample = SourceTexture.Load(int3(IntCoords, 0));
+    float3 LinearColor = ApplyGamma(Sample.rgb);
+    float3x3 Matrix = (bUseRec2020 != 0) ? RGBToYUV_Rec2020 : RGBToYUV_Rec709;
+    float3 YUV = mul(Matrix, LinearColor);
+    float2 UV = YUV.yz + 0.5f;
+    return saturate(UV);
+}
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint Width;
+    uint Height;
+    SourceTexture.GetDimensions(Width, Height);
+
+    if (DispatchThreadId.x >= Width || DispatchThreadId.y >= Height)
+    {
+        return;
+    }
+
+    uint2 Pixel = DispatchThreadId.xy;
+    float4 Sample = SourceTexture.Load(int3(Pixel, 0));
+    float3 LinearColor = ApplyGamma(Sample.rgb);
+    float3x3 Matrix = (bUseRec2020 != 0) ? RGBToYUV_Rec2020 : RGBToYUV_Rec709;
+    float3 YUV = mul(Matrix, LinearColor);
+
+    float Luma = EncodeLuma(YUV.x);
+    OutputLumaTexture[Pixel] = Luma;
+
+    if ((Pixel.x & 1u) == 0u && (Pixel.y & 1u) == 0u)
+    {
+        uint2 ClampMax = uint2(max(int(Width) - 1, 0), max(int(Height) - 1, 0));
+
+        float2 UVSum = float2(0.0f, 0.0f);
+        UVSum += SampleToChroma(Pixel.xy, ClampMax);
+        UVSum += SampleToChroma(float2(min(Pixel.x + 1u, ClampMax.x), Pixel.y), ClampMax);
+        UVSum += SampleToChroma(float2(Pixel.x, min(Pixel.y + 1u, ClampMax.y)), ClampMax);
+        UVSum += SampleToChroma(float2(min(Pixel.x + 1u, ClampMax.x), min(Pixel.y + 1u, ClampMax.y)), ClampMax);
+        float2 AverageUV = UVSum * 0.25f;
+
+        uint2 ChromaCoords = Pixel / 2u;
+        OutputChromaTexture[ChromaCoords] = EncodeChroma(AverageUV);
+    }
+}

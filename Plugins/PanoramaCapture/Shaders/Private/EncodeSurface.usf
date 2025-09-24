@@ -1,0 +1,32 @@
+#include "/Engine/Public/Platform.ush"
+
+Texture2D<float4> SourceTexture;
+RWTexture2D<float4> OutputTexture;
+
+cbuffer FEncodeSurfaceParameters
+{
+    uint bApplySRGB;
+};
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint Width;
+    uint Height;
+    SourceTexture.GetDimensions(Width, Height);
+
+    if (DispatchThreadId.x >= Width || DispatchThreadId.y >= Height)
+    {
+        return;
+    }
+
+    float4 Sample = SourceTexture.Load(int3(DispatchThreadId.xy, 0));
+    float3 Color = saturate(Sample.rgb);
+
+    if (bApplySRGB != 0)
+    {
+        Color = pow(Color, 1.0f / 2.2f);
+    }
+
+    OutputTexture[DispatchThreadId.xy] = float4(Color, saturate(Sample.a));
+}

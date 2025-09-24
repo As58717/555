@@ -1,0 +1,76 @@
+#include "/Engine/Public/Platform.ush"
+
+RWTexture2D<float4> RWOutputTexture;
+TextureCube<float4> SourceTextureLeft;
+TextureCube<float4> SourceTextureRight;
+SamplerState SourceSampler;
+
+cbuffer FCubemapToEquirectParameters
+{
+    float2 OutputResolution;
+    uint bStereo;
+    uint bLinear;
+    uint bStereoOverUnder;
+};
+
+float3 DirectionFromEquirect(float2 InUV)
+{
+    const float Phi = InUV.x * (2.0f * PI) - PI;
+    const float Theta = InUV.y * PI - (PI * 0.5f);
+    const float CosTheta = cos(Theta);
+    return float3(cos(Phi) * CosTheta, sin(Theta), sin(Phi) * CosTheta);
+}
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= (uint)OutputResolution.x || DispatchThreadId.y >= (uint)OutputResolution.y)
+    {
+        return;
+    }
+
+    float2 OutputUV = (float2(DispatchThreadId.xy) + 0.5f) / OutputResolution;
+    float2 SampleUV = OutputUV;
+    uint EyeIndex = 0;
+
+    if (bStereo != 0)
+    {
+        if (bStereoOverUnder != 0)
+        {
+            if (OutputUV.y >= 0.5f)
+            {
+                EyeIndex = 1;
+                SampleUV.y = (OutputUV.y - 0.5f) * 2.0f;
+            }
+            else
+            {
+                SampleUV.y = OutputUV.y * 2.0f;
+            }
+        }
+        else
+        {
+            if (OutputUV.x >= 0.5f)
+            {
+                EyeIndex = 1;
+                SampleUV.x = (OutputUV.x - 0.5f) * 2.0f;
+            }
+            else
+            {
+                SampleUV.x = OutputUV.x * 2.0f;
+            }
+        }
+    }
+
+    SampleUV = saturate(SampleUV);
+
+    float3 Direction = DirectionFromEquirect(SampleUV);
+    float4 Sample = (EyeIndex == 0 ? SourceTextureLeft.SampleLevel(SourceSampler, Direction, 0.0f) : SourceTextureRight.SampleLevel(SourceSampler, Direction, 0.0f));
+
+    if (bLinear == 0)
+    {
+        Sample.rgb = pow(saturate(Sample.rgb), 1.0f / 2.2f);
+    }
+
+    uint2 OutputCoords = uint2(OutputUV * OutputResolution);
+    RWOutputTexture[OutputCoords] = Sample;
+}
